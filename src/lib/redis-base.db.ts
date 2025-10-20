@@ -3,7 +3,7 @@
 import { createClient, RedisClientType } from 'redis';
 
 import { AdminConfig } from './admin.types';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { DanmakuSettings, Favorite, IStorage, PlayRecord, SkipConfig } from './types';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -292,7 +292,7 @@ export abstract class BaseRedisStorage implements IStorage {
       this.client.keys(playRecordPattern)
     );
     if (playRecordKeys.length > 0) {
-      await this.withRetry(() => this.client.del(playRecordKeys));
+      await this.withRetry(() => this.client.del(playRecordKeys as any));
     }
 
     // 删除收藏夹
@@ -301,7 +301,7 @@ export abstract class BaseRedisStorage implements IStorage {
       this.client.keys(favoritePattern)
     );
     if (favoriteKeys.length > 0) {
-      await this.withRetry(() => this.client.del(favoriteKeys));
+      await this.withRetry(() => this.client.del(favoriteKeys as any));
     }
 
     // 删除跳过片头片尾配置
@@ -310,7 +310,7 @@ export abstract class BaseRedisStorage implements IStorage {
       this.client.keys(skipConfigPattern)
     );
     if (skipConfigKeys.length > 0) {
-      await this.withRetry(() => this.client.del(skipConfigKeys));
+      await this.withRetry(() => this.client.del(skipConfigKeys as any));
     }
   }
 
@@ -441,6 +441,52 @@ export abstract class BaseRedisStorage implements IStorage {
     });
 
     return configs;
+  }
+
+  // ---------- Sorted Set (for Danmaku) ----------
+  async zadd(key: string, ...members: { score: number; member: unknown }[]): Promise<number> {
+    // node-redis v4 使用 zAdd，值为字符串
+    const args = members.map((m) => ({ score: m.score, value: JSON.stringify(m.member) }));
+    const result = await this.withRetry(() => (this.client as any).zAdd(key, args));
+    return typeof result === 'number' ? result : 0;
+  }
+
+  async zrange(key: string, start: number, stop: number): Promise<unknown[]> {
+    const result = await this.withRetry(() => (this.client as any).zRange(key, start, stop));
+    if (Array.isArray(result)) {
+      return result.map((item) => {
+        try {
+          return JSON.parse(String(item));
+        } catch {
+          return item;
+        }
+      });
+    }
+    return [];
+  }
+
+  // ---------- 通用字符串读写 ----------
+  async getString(key: string): Promise<string | null> {
+    const val = await this.withRetry(() => this.client.get(key));
+    return val === null ? null : String(val);
+  }
+
+  async setString(key: string, value: string): Promise<void> {
+    await this.withRetry(() => this.client.set(key, value));
+  }
+
+  // ---------- 弹幕显示设置（每用户） ----------
+  private danmakuSettingsKey(user: string) {
+    return `u:${user}:danmaku:settings`;
+  }
+
+  async getDanmakuSettings(userName: string): Promise<DanmakuSettings | null> {
+    const val = await this.withRetry(() => this.client.get(this.danmakuSettingsKey(userName)));
+    return val ? (JSON.parse(String(val)) as DanmakuSettings) : null;
+  }
+
+  async setDanmakuSettings(userName: string, settings: DanmakuSettings): Promise<void> {
+    await this.withRetry(() => this.client.set(this.danmakuSettingsKey(userName), JSON.stringify(settings)));
   }
 
   // 清空所有数据

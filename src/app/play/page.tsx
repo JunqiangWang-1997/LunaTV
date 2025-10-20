@@ -1,8 +1,11 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment, @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, no-console, @next/next/no-img-element */
+/* eslint-disable @typescript-eslint/ban-ts-comment, @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps, no-console, @next/next/no-img-element, simple-import-sort/imports */
 
 'use client';
 
 import Artplayer from 'artplayer';
+// 弹幕插件将在客户端动态导入，避免 SSR 问题
+// import artplayerPluginDanmuku from 'artplayer-plugin-danmuku';
+//import 'artplayer-plugin-danmuku/style.css';
 import Hls from 'hls.js';
 import { Heart } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -20,10 +23,13 @@ import {
   savePlayRecord,
   saveSkipConfig,
   subscribeToDataUpdates,
+  getDanmakuSettings as getDmSettingsClient,
+  setDanmakuSettings as setDmSettingsClient,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 
+import DanmakuImport from '@/components/DanmakuImport';
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
 
@@ -60,8 +66,11 @@ function PlayPageClient() {
   // 收藏状态
   const [favorited, setFavorited] = useState(false);
 
+  // 弹幕导入状态
+  const [showDanmakuImport, setShowDanmakuImport] = useState(false);
+
   // 跳过片头片尾配置
-  const [skipConfig, setSkipConfig] = useState<{
+  const [skipConfig, setSkipConfig] = useState<{ 
     enable: boolean;
     intro_time: number;
     outro_time: number;
@@ -202,6 +211,25 @@ function PlayPageClient() {
 
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
+  // 用户弹幕设置（服务端持久化）
+  const danmakuSettingsRef = useRef<{ opacity?: number; fontSize?: number; areaBottom?: string | number; speed?: number; synchronousPlayback?: boolean } | null>(null);
+
+  const _persistDanmakuSettings = async (partial: Partial<{ opacity: number; fontSize: number; areaBottom: string | number; speed: number; synchronousPlayback: boolean }>) => {
+    const prev = danmakuSettingsRef.current || {};
+    const next = { ...prev, ...partial } as any;
+    danmakuSettingsRef.current = next;
+    try {
+      await setDmSettingsClient({
+        opacity: next.opacity ?? 0.66,
+        fontSize: next.fontSize ?? 25,
+        areaBottom: next.areaBottom ?? '50%',
+        speed: next.speed ?? 7,
+        synchronousPlayback: next.synchronousPlayback ?? true,
+      });
+    } catch (e) {
+      console.debug('save danmaku settings failed', e);
+    }
+  };
 
   // Wake Lock 相关
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
@@ -218,7 +246,7 @@ function PlayPageClient() {
 
     // 将播放源均分为两批，并发测速各批，避免一次性过多请求
     const batchSize = Math.ceil(sources.length / 2);
-    const allResults: Array<{
+    const allResults: Array<{ 
       source: SearchResult;
       testResult: { quality: string; loadSpeed: string; pingTime: number };
     } | null> = [];
@@ -274,7 +302,7 @@ function PlayPageClient() {
     });
 
     // 过滤出成功的结果用于优选计算
-    const successfulResults = allResults.filter(Boolean) as Array<{
+    const successfulResults = allResults.filter(Boolean) as Array<{ 
       source: SearchResult;
       testResult: { quality: string; loadSpeed: string; pingTime: number };
     }>;
@@ -328,9 +356,9 @@ function PlayPageClient() {
     console.log('播放源评分排序结果:');
     resultsWithScore.forEach((result, index) => {
       console.log(
-        `${index + 1}. ${result.source.source_name
-        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${result.testResult.loadSpeed
-        }, ${result.testResult.pingTime}ms)`
+        `${index + 1}. ${result.source.source_name}
+        - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${result.testResult.loadSpeed}
+        , ${result.testResult.pingTime}ms)`
       );
     });
 
@@ -514,7 +542,7 @@ function PlayPageClient() {
   }
 
   // 跳过片头片尾配置相关函数
-  const handleSkipConfigChange = async (newConfig: {
+  const handleSkipConfigChange = async (newConfig: { 
     enable: boolean;
     intro_time: number;
     outro_time: number;
@@ -652,6 +680,15 @@ function PlayPageClient() {
 
   // 进入页面时直接获取全部源信息
   useEffect(() => {
+    // 拉取用户弹幕设置（不阻塞主流程）
+    (async () => {
+      try {
+        const s = await getDmSettingsClient();
+        danmakuSettingsRef.current = s || null;
+      } catch (e) {
+        console.debug('load danmaku settings skipped', e);
+      }
+    })();
     const fetchSourceDetail = async (
       source: string,
       id: string
@@ -1256,70 +1293,202 @@ function PlayPageClient() {
     }
     console.log(videoUrl);
 
-    // 检测是否为WebKit浏览器
-    const isWebkit =
-      typeof window !== 'undefined' &&
-      typeof (window as any).webkitConvertPointFromNodeToPage === 'function';
-
-    // 非WebKit浏览器且播放器已存在，使用switch方法切换
-    if (!isWebkit && artPlayerRef.current) {
-      artPlayerRef.current.switch = videoUrl;
-      artPlayerRef.current.title = `${videoTitle} - 第${currentEpisodeIndex + 1
-        }集`;
-      artPlayerRef.current.poster = videoCover;
-      if (artPlayerRef.current?.video) {
-        ensureVideoSource(
-          artPlayerRef.current.video as HTMLVideoElement,
-          videoUrl
-        );
-      }
-      return;
-    }
+    // 统一走完整重建流程，确保弹幕插件按集重新加载（避免 switch 复用导致弹幕串集）
+    // 如需优化性能，可后续接入 danmuku 插件的 load API 实现增量刷新
 
     // WebKit浏览器或首次创建：销毁之前的播放器实例并创建新的
     if (artPlayerRef.current) {
       cleanupPlayer();
     }
 
-    try {
-      // 创建新的播放器实例
-      Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
-      Artplayer.USE_RAF = true;
+    // 动态导入弹幕插件（客户端专用，避免 SSR 问题）
+    const initializePlayerWithDanmaku = async () => {
+      if (!artRef.current) return; // 确保容器存在
+      
+      try {
+        // 在初始化弹幕插件前，确保后端已导入第三方弹幕（站长配置）
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          await fetch('/api/danmaku/ensure', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              source: currentSourceRef.current,
+              id: currentIdRef.current,
+              episode: currentEpisodeIndexRef.current, // 0-based，与读取保持一致
+              title: videoTitleRef.current,
+            }),
+            signal: controller.signal,
+          }).catch((e) => console.debug('ensure danmaku skipped', e?.name || e));
+          clearTimeout(timer);
+        } catch (e) {
+          console.debug('ensure danmaku failed', e);
+        }
+        // 动态导入弹幕插件
+        const artplayerPluginDanmukuModule = await import('artplayer-plugin-danmuku');
+        const artplayerPluginDanmuku = artplayerPluginDanmukuModule.default || artplayerPluginDanmukuModule;
 
-      artPlayerRef.current = new Artplayer({
-        container: artRef.current,
-        url: videoUrl,
-        poster: videoCover,
-        volume: 0.7,
-        isLive: false,
-        muted: false,
-        autoplay: true,
-        pip: true,
-        autoSize: false,
-        autoMini: false,
-        screenshot: false,
-        setting: true,
-        loop: false,
-        flip: false,
-        playbackRate: true,
-        aspectRatio: false,
-        fullscreen: true,
-        fullscreenWeb: true,
-        subtitleOffset: false,
-        miniProgressBar: false,
-        mutex: true,
-        playsInline: true,
-        autoPlayback: false,
-        airplay: true,
-        theme: '#22c55e',
-        lang: 'zh-cn',
-        hotkey: false,
-        fastForward: true,
-        autoOrientation: true,
-        lock: true,
-        moreVideoAttr: {
-          crossOrigin: 'anonymous',
-        },
+        // 创建新的播放器实例
+        Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+        Artplayer.USE_RAF = true;
+
+  const dm = danmakuSettingsRef.current;
+  artPlayerRef.current = new Artplayer({
+          container: artRef.current,
+          url: videoUrl,
+          poster: videoCover,
+          volume: 0.7,
+          isLive: false,
+          muted: false,
+          autoplay: true,
+          pip: true,
+          autoSize: false,
+          autoMini: false,
+          screenshot: false,
+          setting: true,
+          loop: false,
+          flip: false,
+          playbackRate: true,
+          aspectRatio: false,
+          fullscreen: true,
+          fullscreenWeb: true,
+          subtitleOffset: false,
+          miniProgressBar: false,
+          mutex: true,
+          playsInline: true,
+          autoPlayback: false,
+          airplay: true,
+          theme: '#22c55e',
+          lang: 'zh-cn',
+          hotkey: false,
+          fastForward: true,
+          autoOrientation: true,
+          lock: true,
+          moreVideoAttr: {
+            crossOrigin: 'anonymous',
+          },
+          plugins: [
+            // @ts-ignore - 动态导入的插件类型定义不完整
+            artplayerPluginDanmuku({
+            // 弹幕加载地址，指向我们的 GET API
+            danmuku: async () => {
+              if (!currentSourceRef.current || !currentIdRef.current) return [];
+              
+              const url = `/api/danmaku?source=${currentSourceRef.current}&id=${currentIdRef.current}&episode=${currentEpisodeIndexRef.current}`;
+              const res = await fetch(url);
+              const danmakuList = await res.json();
+              
+              // 如果弹幕为空且有详情信息，尝试自动导入
+              if (Array.isArray(danmakuList) && danmakuList.length === 0 && detail) {
+                console.log('🔍 弹幕为空，尝试自动导入...');
+                
+                try {
+                  // 调用服务端 API 自动导入（服务端会尝试搜索 Bilibili）
+                  const autoImportRes = await fetch('/api/danmaku/auto-import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      source: currentSourceRef.current,
+                      id: currentIdRef.current,
+                      episode: currentEpisodeIndexRef.current,
+                      title: detail.title || '',
+                      year: detail.year || '',
+                    }),
+                  });
+                  
+                  if (autoImportRes.ok) {
+                    const result = await autoImportRes.json();
+                    if (result.ok && result.imported) {
+                      console.log(`✅ 自动导入成功: ${result.count} 条弹幕`);
+                      if (artPlayerRef.current) {
+                        artPlayerRef.current.notice.show = `已导入 ${result.count} 条弹幕`;
+                      }
+                      // 重新加载弹幕
+                      const reloadRes = await fetch(url);
+                      return await reloadRes.json();
+                    } else {
+                      console.warn(`⚠️  ${result.message || '自动导入未成功'}`);
+                    }
+                  }
+                } catch (err) {
+                  console.error('❌ 自动导入错误:', err);
+                }
+              }
+              
+              return danmakuList;
+            },
+            // 弹幕显示默认设置 + 用户偏好覆盖
+            speed: dm?.speed ?? 7, // 弹幕持续时间更长=移动更慢（单位秒，范围在[1 ~ 10]）
+            opacity: dm?.opacity ?? 0.66, // 默认不透明度 66%
+            fontSize: dm?.fontSize ?? 25, // 默认字体大小 25px
+            color: '#FFFFFF', // 默认颜色
+            mode: 0, // 默认模式，0-滚动，1-静止
+            margin: [10, (dm?.areaBottom ?? '50%') as any], // 限定显示区域约半屏（上 10px，下 50%）
+            antiOverlap: true, // 是否防重叠
+            synchronousPlayback: dm?.synchronousPlayback ?? true, // 开启同步视频倍速
+            lockTime: 5, // 输入框锁定时间，单位秒，范围在[1 ~ 60]
+            maxLength: 100, // 输入框最大可输入的字数，范围在[0 ~ 500]
+            theme: 'dark', // 输入框主题，可选'light'或'dark'
+            // 发送弹幕前的回调函数
+            beforeEmit: async (danmu: any) => {
+              // 基本的客户端验证
+              if (!danmu.text.trim()) {
+                return false;
+              }
+
+              // 检查必需的 refs 是否存在
+              if (!artPlayerRef.current || !currentSourceRef.current || !currentIdRef.current) {
+                console.error('播放器或视频信息未就绪');
+                return false;
+              }
+
+              const danmakuToSend = {
+                ...danmu,
+                time: artPlayerRef.current.currentTime, // 确保时间是当前播放时间
+              };
+
+              const postData = {
+                source: currentSourceRef.current,
+                id: currentIdRef.current,
+                episode: currentEpisodeIndexRef.current,
+                danmaku: danmakuToSend,
+              };
+
+              // 异步发送到服务器
+              try {
+                const res = await fetch('/api/danmaku', { 
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify(postData),
+                });
+                
+                const result = await res.json();
+                
+                if (result.ok && artPlayerRef.current) {
+                  artPlayerRef.current.notice.show = '弹幕发送成功';
+                  // 返回 true，插件会自动清空输入框
+                  return true;
+                } else {
+                  if (artPlayerRef.current) {
+                    artPlayerRef.current.notice.show = '弹幕发送失败';
+                  }
+                  // 返回 false，插件保留输入框内容供用户重试
+                  return false;
+                }
+              } catch (err) {
+                console.error('Failed to send danmaku:', err);
+                if (artPlayerRef.current) {
+                  artPlayerRef.current.notice.show = '弹幕发送失败';
+                }
+                // 发送失败，保留输入框内容
+                return false;
+              }
+            },
+          }),
+        ],
         // HLS 支持配置
         customType: {
           m3u8: function (video: HTMLVideoElement, url: string) {
@@ -1403,6 +1572,18 @@ function PlayPageClient() {
                 // ignore
               }
               return newVal ? '当前开启' : '当前关闭';
+            },
+          },
+          {
+            name: '弹幕跟随倍速',
+            html: '弹幕跟随倍速',
+            switch: (danmakuSettingsRef.current?.synchronousPlayback ?? true) as boolean,
+            onSwitch: function (item: any) {
+              _persistDanmakuSettings({ synchronousPlayback: !item.switch });
+              if (artPlayerRef.current) {
+                artPlayerRef.current.notice.show = '已保存，下次播放生效';
+              }
+              return !item.switch;
             },
           },
           {
@@ -1551,8 +1732,7 @@ function PlayPageClient() {
           if (
             Math.abs(
               artPlayerRef.current.playbackRate - lastPlaybackRateRef.current
-            ) > 0.01 &&
-            isWebkit
+            ) > 0.01
           ) {
             artPlayerRef.current.playbackRate = lastPlaybackRateRef.current;
           }
@@ -1647,10 +1827,14 @@ function PlayPageClient() {
           videoUrl
         );
       }
-    } catch (err) {
-      console.error('创建播放器失败:', err);
-      setError('播放器初始化失败');
-    }
+      } catch (err) {
+        console.error('创建播放器失败:', err);
+        setError('播放器初始化失败');
+      }
+    };
+
+    // 调用异步初始化函数
+    initializePlayerWithDanmaku();
   }, [Artplayer, Hls, videoUrl, loading, blockAdEnabled]);
 
   // 当组件卸载时清理定时器、Wake Lock 和播放器资源
@@ -1671,39 +1855,39 @@ function PlayPageClient() {
 
   if (loading) {
     return (
-      <PageLayout activePath='/play'>
-        <div className='flex items-center justify-center min-h-screen bg-transparent'>
-          <div className='text-center max-w-md mx-auto px-6'>
+      <PageLayout activePath="/play">
+        <div className="flex items-center justify-center min-h-screen bg-transparent">
+          <div className="text-center max-w-md mx-auto px-6">
             {/* 动画影院图标 */}
-            <div className='relative mb-8'>
-              <div className='relative mx-auto w-24 h-24 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300'>
-                <div className='text-white text-4xl'>
+            <div className="relative mb-8">
+              <div className="relative mx-auto w-24 h-24 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300">
+                <div className="text-white text-4xl">
                   {loadingStage === 'searching' && '🔍'}
                   {loadingStage === 'preferring' && '⚡'}
                   {loadingStage === 'fetching' && '🎬'}
                   {loadingStage === 'ready' && '✨'}
                 </div>
                 {/* 旋转光环 */}
-                <div className='absolute -inset-2 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl opacity-20 animate-spin'></div>
+                <div className="absolute -inset-2 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl opacity-20 animate-spin"></div>
               </div>
 
               {/* 浮动粒子效果 */}
-              <div className='absolute top-0 left-0 w-full h-full pointer-events-none'>
-                <div className='absolute top-2 left-2 w-2 h-2 bg-green-400 rounded-full animate-bounce'></div>
+              <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+                <div className="absolute top-2 left-2 w-2 h-2 bg-green-400 rounded-full animate-bounce"></div>
                 <div
-                  className='absolute top-4 right-4 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce'
+                  className="absolute top-4 right-4 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce"
                   style={{ animationDelay: '0.5s' }}
                 ></div>
                 <div
-                  className='absolute bottom-3 left-6 w-1 h-1 bg-lime-400 rounded-full animate-bounce'
+                  className="absolute bottom-3 left-6 w-1 h-1 bg-lime-400 rounded-full animate-bounce"
                   style={{ animationDelay: '1s' }}
                 ></div>
               </div>
             </div>
 
             {/* 进度指示器 */}
-            <div className='mb-6 w-80 mx-auto'>
-              <div className='flex justify-center space-x-2 mb-4'>
+            <div className="mb-6 w-80 mx-auto">
+              <div className="flex justify-center space-x-2 mb-4">
                 <div
                   className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'searching' || loadingStage === 'fetching'
                     ? 'bg-green-500 scale-125'
@@ -1730,9 +1914,9 @@ function PlayPageClient() {
               </div>
 
               {/* 进度条 */}
-              <div className='w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden'>
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
                 <div
-                  className='h-full bg-gradient-to-r from-green-500 to-emerald-600 rounded-full transition-all duration-1000 ease-out'
+                  className="h-full bg-gradient-to-r from-green-500 to-emerald-600 rounded-full transition-all duration-1000 ease-out"
                   style={{
                     width:
                       loadingStage === 'searching' ||
@@ -1747,8 +1931,8 @@ function PlayPageClient() {
             </div>
 
             {/* 加载消息 */}
-            <div className='space-y-2'>
-              <p className='text-xl font-semibold text-gray-800 dark:text-gray-200 animate-pulse'>
+            <div className="space-y-2">
+              <p className="text-xl font-semibold text-gray-800 dark:text-gray-200 animate-pulse">
                 {loadingMessage}
               </p>
             </div>
@@ -1760,62 +1944,62 @@ function PlayPageClient() {
 
   if (error) {
     return (
-      <PageLayout activePath='/play'>
-        <div className='flex items-center justify-center min-h-screen bg-transparent'>
-          <div className='text-center max-w-md mx-auto px-6'>
+      <PageLayout activePath="/play">
+        <div className="flex items-center justify-center min-h-screen bg-transparent">
+          <div className="text-center max-w-md mx-auto px-6">
             {/* 错误图标 */}
-            <div className='relative mb-8'>
-              <div className='relative mx-auto w-24 h-24 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300'>
-                <div className='text-white text-4xl'>😵</div>
+            <div className="relative mb-8">
+              <div className="relative mx-auto w-24 h-24 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300">
+                <div className="text-white text-4xl">😵</div>
                 {/* 脉冲效果 */}
-                <div className='absolute -inset-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl opacity-20 animate-pulse'></div>
+                <div className="absolute -inset-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-2xl opacity-20 animate-pulse"></div>
               </div>
 
               {/* 浮动错误粒子 */}
-              <div className='absolute top-0 left-0 w-full h-full pointer-events-none'>
-                <div className='absolute top-2 left-2 w-2 h-2 bg-red-400 rounded-full animate-bounce'></div>
+              <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+                <div className="absolute top-2 left-2 w-2 h-2 bg-red-400 rounded-full animate-bounce"></div>
                 <div
-                  className='absolute top-4 right-4 w-1.5 h-1.5 bg-orange-400 rounded-full animate-bounce'
+                  className="absolute top-4 right-4 w-1.5 h-1.5 bg-orange-400 rounded-full animate-bounce"
                   style={{ animationDelay: '0.5s' }}
                 ></div>
                 <div
-                  className='absolute bottom-3 left-6 w-1 h-1 bg-yellow-400 rounded-full animate-bounce'
+                  className="absolute bottom-3 left-6 w-1 h-1 bg-yellow-400 rounded-full animate-bounce"
                   style={{ animationDelay: '1s' }}
                 ></div>
               </div>
             </div>
 
             {/* 错误信息 */}
-            <div className='space-y-4 mb-8'>
-              <h2 className='text-2xl font-bold text-gray-800 dark:text-gray-200'>
+            <div className="space-y-4 mb-8">
+              <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-200">
                 哎呀，出现了一些问题
               </h2>
-              <div className='bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4'>
-                <p className='text-red-600 dark:text-red-400 font-medium'>
+              <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+                <p className="text-red-600 dark:text-red-400 font-medium">
                   {error}
                 </p>
               </div>
-              <p className='text-sm text-gray-500 dark:text-gray-400'>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
                 请检查网络连接或尝试刷新页面
               </p>
             </div>
 
             {/* 操作按钮 */}
-            <div className='space-y-3'>
+            <div className="space-y-3">
               <button
                 onClick={() =>
                   videoTitle
                     ? router.push(`/search?q=${encodeURIComponent(videoTitle)}`)
                     : router.back()
                 }
-                className='w-full px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl font-medium hover:from-green-600 hover:to-emerald-700 transform hover:scale-105 transition-all duration-200 shadow-lg hover:shadow-xl'
+                className="w-full px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl font-medium hover:from-green-600 hover:to-emerald-700 transform hover:scale-105 transition-all duration-200 shadow-lg hover:shadow-xl"
               >
                 {videoTitle ? '🔍 返回搜索' : '← 返回上页'}
               </button>
 
               <button
                 onClick={() => window.location.reload()}
-                className='w-full px-6 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors duration-200'
+                className="w-full px-6 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors duration-200"
               >
                 🔄 重新尝试
               </button>
@@ -1827,47 +2011,47 @@ function PlayPageClient() {
   }
 
   return (
-    <PageLayout activePath='/play'>
-      <div className='flex flex-col gap-3 py-4 px-5 lg:px-[3rem] 2xl:px-20'>
+    <PageLayout activePath="/play">
+      <div className="flex flex-col gap-3 py-4 px-5 lg:px-[3rem] 2xl:px-20">
         {/* 第一行：影片标题 */}
-        <div className='py-1'>
-          <h1 className='text-xl font-semibold text-gray-900 dark:text-gray-100'>
+        <div className="py-1">
+          <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
             {videoTitle || '影片标题'}
             {totalEpisodes > 1 && (
-              <span className='text-gray-500 dark:text-gray-400'>
+              <span className="text-gray-500 dark:text-gray-400">
                 {` > ${detail?.episodes_titles?.[currentEpisodeIndex] || `第 ${currentEpisodeIndex + 1} 集`}`}
               </span>
             )}
           </h1>
         </div>
         {/* 第二行：播放器和选集 */}
-        <div className='space-y-2'>
+        <div className="space-y-2">
           {/* 折叠控制 - 仅在 lg 及以上屏幕显示 */}
-          <div className='hidden lg:flex justify-end'>
+          <div className="hidden lg:flex justify-end">
             <button
               onClick={() =>
                 setIsEpisodeSelectorCollapsed(!isEpisodeSelectorCollapsed)
               }
-              className='group relative flex items-center space-x-1.5 px-3 py-1.5 rounded-full bg-white/80 hover:bg-white dark:bg-gray-800/80 dark:hover:bg-gray-800 backdrop-blur-sm border border-gray-200/50 dark:border-gray-700/50 shadow-sm hover:shadow-md transition-all duration-200'
+              className="group relative flex items-center space-x-1.5 px-3 py-1.5 rounded-full bg-white/80 hover:bg-white dark:bg-gray-800/80 dark:hover:bg-gray-800 backdrop-blur-sm border border-gray-200/50 dark:border-gray-700/50 shadow-sm hover:shadow-md transition-all duration-200"
               title={
                 isEpisodeSelectorCollapsed ? '显示选集面板' : '隐藏选集面板'
               }
             >
               <svg
-                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'
+                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'}
                   }`}
-                fill='none'
-                stroke='currentColor'
-                viewBox='0 0 24 24'
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
               >
                 <path
-                  strokeLinecap='round'
-                  strokeLinejoin='round'
-                  strokeWidth='2'
-                  d='M9 5l7 7-7 7'
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M9 5l7 7-7 7"
                 />
               </svg>
-              <span className='text-xs font-medium text-gray-600 dark:text-gray-300'>
+              <span className="text-xs font-medium text-gray-600 dark:text-gray-300">
                 {isEpisodeSelectorCollapsed ? '显示' : '隐藏'}
               </span>
 
@@ -1884,49 +2068,49 @@ function PlayPageClient() {
           <div
             className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
               ? 'grid-cols-1'
-              : 'grid-cols-1 md:grid-cols-4'
+              : 'grid-cols-1 md:grid-cols-4'}
               }`}
           >
             {/* 播放器 */}
             <div
-              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
+              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'}
                 }`}
             >
-              <div className='relative w-full h-[300px] lg:h-full'>
+              <div className="relative w-full h-[300px] lg:h-full">
                 <div
                   ref={artRef}
-                  className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
+                  className="bg-black w-full h-full rounded-xl overflow-hidden shadow-lg"
                 ></div>
 
                 {/* 换源加载蒙层 */}
                 {isVideoLoading && (
-                  <div className='absolute inset-0 bg-black/85 backdrop-blur-sm rounded-xl flex items-center justify-center z-[500] transition-all duration-300'>
-                    <div className='text-center max-w-md mx-auto px-6'>
+                  <div className="absolute inset-0 bg-black/85 backdrop-blur-sm rounded-xl flex items-center justify-center z-[500] transition-all duration-300">
+                    <div className="text-center max-w-md mx-auto px-6">
                       {/* 动画影院图标 */}
-                      <div className='relative mb-8'>
-                        <div className='relative mx-auto w-24 h-24 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300'>
-                          <div className='text-white text-4xl'>🎬</div>
+                      <div className="relative mb-8">
+                        <div className="relative mx-auto w-24 h-24 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl shadow-2xl flex items-center justify-center transform hover:scale-105 transition-transform duration-300">
+                          <div className="text-white text-4xl">🎬</div>
                           {/* 旋转光环 */}
-                          <div className='absolute -inset-2 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl opacity-20 animate-spin'></div>
+                          <div className="absolute -inset-2 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl opacity-20 animate-spin"></div>
                         </div>
 
                         {/* 浮动粒子效果 */}
-                        <div className='absolute top-0 left-0 w-full h-full pointer-events-none'>
-                          <div className='absolute top-2 left-2 w-2 h-2 bg-green-400 rounded-full animate-bounce'></div>
+                        <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+                          <div className="absolute top-2 left-2 w-2 h-2 bg-green-400 rounded-full animate-bounce"></div>
                           <div
-                            className='absolute top-4 right-4 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce'
+                            className="absolute top-4 right-4 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce"
                             style={{ animationDelay: '0.5s' }}
                           ></div>
                           <div
-                            className='absolute bottom-3 left-6 w-1 h-1 bg-lime-400 rounded-full animate-bounce'
+                            className="absolute bottom-3 left-6 w-1 h-1 bg-lime-400 rounded-full animate-bounce"
                             style={{ animationDelay: '1s' }}
                           ></div>
                         </div>
                       </div>
 
                       {/* 换源消息 */}
-                      <div className='space-y-2'>
-                        <p className='text-xl font-semibold text-white animate-pulse'>
+                      <div className="space-y-2">
+                        <p className="text-xl font-semibold text-white animate-pulse">
                           {videoLoadingStage === 'sourceChanging'
                             ? '🔄 切换播放源...'
                             : '🔄 视频加载中...'}
@@ -1942,7 +2126,7 @@ function PlayPageClient() {
             <div
               className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
                 ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
-                : 'md:col-span-1 lg:opacity-100 lg:scale-100'
+                : 'md:col-span-1 lg:opacity-100 lg:scale-100'}
                 }`}
             >
               <EpisodeSelector
@@ -1964,28 +2148,42 @@ function PlayPageClient() {
         </div>
 
         {/* 详情展示 */}
-        <div className='grid grid-cols-1 md:grid-cols-4 gap-4'>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {/* 文字区 */}
-          <div className='md:col-span-3'>
-            <div className='p-6 flex flex-col min-h-0'>
+          <div className="md:col-span-3">
+            <div className="p-6 flex flex-col min-h-0">
               {/* 标题 */}
-              <h1 className='text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full'>
+              <h1 className="text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full">
                 {videoTitle || '影片标题'}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleToggleFavorite();
                   }}
-                  className='ml-3 flex-shrink-0 hover:opacity-80 transition-opacity'
+                  className="ml-3 flex-shrink-0 hover:opacity-80 transition-opacity"
+                  title={favorited ? '取消收藏' : '添加收藏'}
                 >
                   <FavoriteIcon filled={favorited} />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowDanmakuImport(true);
+                  }}
+                  className="ml-2 flex-shrink-0 px-3 py-1.5 bg-purple-500 hover:bg-purple-600 text-white text-sm rounded-lg transition-colors duration-200 flex items-center gap-1.5"
+                  title="导入第三方弹幕"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                  <span>导入弹幕</span>
                 </button>
               </h1>
 
               {/* 关键信息行 */}
-              <div className='flex flex-wrap items-center gap-3 text-base mb-4 opacity-80 flex-shrink-0'>
+              <div className="flex flex-wrap items-center gap-3 text-base mb-4 opacity-80 flex-shrink-0">
                 {detail?.class && (
-                  <span className='text-green-600 font-semibold'>
+                  <span className="text-green-600 font-semibold">
                     {detail.class}
                   </span>
                 )}
@@ -1993,7 +2191,7 @@ function PlayPageClient() {
                   <span>{detail?.year || videoYear}</span>
                 )}
                 {detail?.source_name && (
-                  <span className='border border-gray-500/60 px-2 py-[1px] rounded'>
+                  <span className="border border-gray-500/60 px-2 py-[1px] rounded">
                     {detail.source_name}
                   </span>
                 )}
@@ -2002,7 +2200,7 @@ function PlayPageClient() {
               {/* 剧情简介 */}
               {detail?.desc && (
                 <div
-                  className='mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide'
+                  className="mt-0 text-base leading-relaxed opacity-90 overflow-y-auto pr-2 flex-1 min-h-0 scrollbar-hide"
                   style={{ whiteSpace: 'pre-line' }}
                 >
                   {detail.desc}
@@ -2012,45 +2210,45 @@ function PlayPageClient() {
           </div>
 
           {/* 封面展示 */}
-          <div className='hidden md:block md:col-span-1 md:order-first'>
-            <div className='pl-0 py-4 pr-6'>
-              <div className='relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden'>
+          <div className="hidden md:block md:col-span-1 md:order-first">
+            <div className="pl-0 py-4 pr-6">
+              <div className="relative bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden">
                 {videoCover ? (
                   <>
                     <img
                       src={processImageUrl(videoCover)}
                       alt={videoTitle}
-                      className='w-full h-full object-cover'
+                      className="w-full h-full object-cover"
                     />
 
                     {/* 豆瓣链接按钮 */}
                     {videoDoubanId !== 0 && (
                       <a
                         href={`https://movie.douban.com/subject/${videoDoubanId.toString()}`}
-                        target='_blank'
-                        rel='noopener noreferrer'
-                        className='absolute top-3 left-3'
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="absolute top-3 left-3"
                       >
-                        <div className='bg-green-500 text-white text-xs font-bold w-8 h-8 rounded-full flex items-center justify-center shadow-md hover:bg-green-600 hover:scale-[1.1] transition-all duration-300 ease-out'>
+                        <div className="bg-green-500 text-white text-xs font-bold w-8 h-8 rounded-full flex items-center justify-center shadow-md hover:bg-green-600 hover:scale-[1.1] transition-all duration-300 ease-out">
                           <svg
-                            width='16'
-                            height='16'
-                            viewBox='0 0 24 24'
-                            fill='none'
-                            stroke='currentColor'
-                            strokeWidth='2'
-                            strokeLinecap='round'
-                            strokeLinejoin='round'
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                           >
-                            <path d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'></path>
-                            <path d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'></path>
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
                           </svg>
                         </div>
                       </a>
                     )}
                   </>
                 ) : (
-                  <span className='text-gray-600 dark:text-gray-400'>
+                  <span className="text-gray-600 dark:text-gray-400">
                     封面图片
                   </span>
                 )}
@@ -2059,6 +2257,17 @@ function PlayPageClient() {
           </div>
         </div>
       </div>
+
+      {/* 弹幕导入对话框 */}
+      {showDanmakuImport && detail && (
+        <DanmakuImport
+          source={currentSource}
+          videoId={currentId}
+          episodeIndex={currentEpisodeIndex}
+          animeTitle={videoTitle}
+          onClose={() => setShowDanmakuImport(false)}
+        />
+      )}
     </PageLayout>
   );
 }
@@ -2068,23 +2277,23 @@ const FavoriteIcon = ({ filled }: { filled: boolean }) => {
   if (filled) {
     return (
       <svg
-        className='h-7 w-7'
-        viewBox='0 0 24 24'
-        xmlns='http://www.w3.org/2000/svg'
+        className="h-7 w-7"
+        viewBox="0 0 24 24"
+        xmlns="http://www.w3.org/2000/svg"
       >
         <path
-          d='M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z'
-          fill='#ef4444' /* Tailwind red-500 */
-          stroke='#ef4444'
-          strokeWidth='2'
-          strokeLinecap='round'
-          strokeLinejoin='round'
+          d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+          fill="#ef4444" /* Tailwind red-500 */
+          stroke="#ef4444"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
         />
       </svg>
     );
   }
   return (
-    <Heart className='h-7 w-7 stroke-[1] text-gray-600 dark:text-gray-300' />
+    <Heart className="h-7 w-7 stroke-[1] text-gray-600 dark:text-gray-300" />
   );
 };
 

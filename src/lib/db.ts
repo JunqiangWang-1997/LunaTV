@@ -3,7 +3,7 @@
 import { AdminConfig } from './admin.types';
 import { KvrocksStorage } from './kvrocks.db';
 import { RedisStorage } from './redis.db';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { DanmakuSettings, Favorite, IStorage, PlayRecord, SkipConfig } from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
 // storage type 常量: 'localstorage' | 'redis' | 'upstash'，默认 'localstorage'
@@ -231,12 +231,49 @@ export class DbManager {
     return {};
   }
 
+  // ---------- Sorted Set (for Danmaku) ----------
+  async zadd(key: string, ...members: { score: number; member: unknown }[]): Promise<number> {
+    return this.storage.zadd(key, ...members);
+  }
+
+  async zrange(key: string, start: number, stop: number): Promise<unknown[]> {
+    return this.storage.zrange(key, start, stop);
+  }
+
+  // ---------- 通用字符串读写 ----------
+  async getString(key: string): Promise<string | null> {
+    if (typeof (this.storage as any).getString === 'function') {
+      return (this.storage as any).getString(key);
+    }
+    return null;
+  }
+
+  async setString(key: string, value: string): Promise<void> {
+    if (typeof (this.storage as any).setString === 'function') {
+      await (this.storage as any).setString(key, value);
+    }
+  }
+
   // ---------- 数据清理 ----------
   async clearAllData(): Promise<void> {
     if (typeof (this.storage as any).clearAllData === 'function') {
       await (this.storage as any).clearAllData();
     } else {
       throw new Error('存储类型不支持清空数据操作');
+    }
+  }
+
+  // ---------- 弹幕显示设置（每用户） ----------
+  async getDanmakuSettings(userName: string): Promise<DanmakuSettings | null> {
+    if (typeof (this.storage as any).getDanmakuSettings === 'function') {
+      return (this.storage as any).getDanmakuSettings(userName);
+    }
+    return null;
+  }
+
+  async setDanmakuSettings(userName: string, settings: DanmakuSettings): Promise<void> {
+    if (typeof (this.storage as any).setDanmakuSettings === 'function') {
+      return (this.storage as any).setDanmakuSettings(userName, settings);
     }
   }
 }

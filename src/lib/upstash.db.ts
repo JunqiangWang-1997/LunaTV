@@ -3,7 +3,7 @@
 import { Redis } from '@upstash/redis';
 
 import { AdminConfig } from './admin.types';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { DanmakuSettings, Favorite, IStorage, PlayRecord, SkipConfig } from './types';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -342,6 +342,62 @@ export class UpstashRedisStorage implements IStorage {
     });
 
     return configs;
+  }
+
+  // ---------- Sorted Set (for Danmaku) ----------
+  async zadd(key: string, ...members: { score: number; member: any }[]): Promise<number> {
+    // Upstash zadd expects individual arguments: zadd(key, member1, member2, ...)
+    // Convert our array format to individual ScoreMember arguments
+    const result = await withRetry(() => {
+      const args = members.map(m => ({ score: m.score, member: JSON.stringify(m.member) }));
+      return (this.client.zadd as any)(key, ...args);
+    });
+    return typeof result === 'number' ? result : 0;
+  }
+
+  async zrange(key: string, start: number, stop: number): Promise<any[]> {
+    const result = await withRetry(() => this.client.zrange(key, start, stop));
+    // Parse JSON strings back to objects
+    if (Array.isArray(result)) {
+      return result.map(item => {
+        try {
+          return JSON.parse(item as string);
+        } catch {
+          return item;
+        }
+      });
+    }
+    return [];
+  }
+
+  // ---------- 通用字符串读写 ----------
+  async getString(key: string): Promise<string | null> {
+    const val = await withRetry(() => this.client.get(key));
+    if (val === null || typeof val === 'undefined') return null;
+    if (typeof val === 'string') return val;
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return String(val);
+    }
+  }
+
+  async setString(key: string, value: string): Promise<void> {
+    await withRetry(() => this.client.set(key, value));
+  }
+
+  // ---------- 弹幕显示设置（每用户） ----------
+  private danmakuSettingsKey(user: string) {
+    return `u:${user}:danmaku:settings`;
+  }
+
+  async getDanmakuSettings(userName: string): Promise<DanmakuSettings | null> {
+    const val = await withRetry(() => this.client.get(this.danmakuSettingsKey(userName)));
+    return val ? (val as DanmakuSettings) : null;
+  }
+
+  async setDanmakuSettings(userName: string, settings: DanmakuSettings): Promise<void> {
+    await withRetry(() => this.client.set(this.danmakuSettingsKey(userName), settings));
   }
 
   // 清空所有数据

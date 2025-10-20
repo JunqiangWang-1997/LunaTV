@@ -1,9 +1,9 @@
 /* eslint-disable no-console,@typescript-eslint/no-explicit-any */
 
-import * as crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig, refineConfig } from '@/lib/config';
+import { ensureEpisodeImported } from '@/lib/danmaku.import';
 import { db } from '@/lib/db';
 import { fetchVideoDetail } from '@/lib/fetchVideoDetail';
 import { refreshLiveChannels } from '@/lib/live';
@@ -42,6 +42,7 @@ async function cronJob() {
   await refreshConfig();
   await refreshAllLiveChannels();
   await refreshRecordAndFavorites();
+  await autoImportDanmakuFromPlayRecords();
 }
 
 async function refreshAllLiveChannels() {
@@ -104,6 +105,68 @@ async function refreshConfig() {
     }
   } else {
     console.log('跳过刷新：未配置订阅地址或自动更新');
+  }
+}
+
+// 基于播放记录自动导入弹幕
+async function autoImportDanmakuFromPlayRecords() {
+  try {
+    const adminConfig = await getConfig();
+    const danmakuCfg = adminConfig.DanmakuImport;
+    if (!danmakuCfg || danmakuCfg.autoImportEnabled === false) {
+      console.log('跳过自动导入弹幕：未开启');
+      return;
+    }
+
+    const users = await db.getAllUsers();
+    if (process.env.USERNAME && !users.includes(process.env.USERNAME)) {
+      users.push(process.env.USERNAME);
+    }
+
+    // 构建映射索引，便于快速查询覆盖
+    const mappingIndex = new Map<string, {
+      provider?: 'dandanplay' | 'bilibili';
+      episodes?: Record<string, string>;
+      aliasTitle?: string;
+    }>();
+    (danmakuCfg.mappings || []).forEach((m) => mappingIndex.set(m.key, m));
+
+    for (const user of users) {
+      try {
+        const playRecords = await db.getAllPlayRecords(user);
+        for (const [key, record] of Object.entries(playRecords)) {
+          const [source, id] = key.split('+');
+          if (!source || !id) continue;
+
+          const episodeIndex = record.index; // 0-based（存储键与前端读取一致）
+          const episodeOneBased = episodeIndex + 1; // 1-based（用于 DanDanPlay 搜索与映射）
+
+          const map = mappingIndex.get(key);
+          const provider = map?.provider || danmakuCfg.defaultProvider || 'dandanplay';
+          const externalId = map?.episodes?.[String(episodeOneBased)];
+          const titleForSearch = map?.aliasTitle || record.title;
+
+          const result = await ensureEpisodeImported({
+            source,
+            id,
+            episode: episodeIndex,
+            provider,
+            externalId,
+            title: titleForSearch,
+          });
+
+          if (result.imported) {
+            console.log(`已导入弹幕: ${key} E${episodeOneBased} count=${result.count}`);
+          } else if (result.reason !== 'already-exists') {
+            console.log(`跳过/失败: ${key} E${episodeOneBased} reason=${result.reason}`);
+          }
+        }
+      } catch (e) {
+        console.error('自动导入弹幕失败（用户级）：', user, e);
+      }
+    }
+  } catch (e) {
+    console.error('自动导入弹幕失败：', e);
   }
 }
 

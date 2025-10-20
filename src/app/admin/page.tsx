@@ -44,6 +44,7 @@ import { createPortal } from 'react-dom';
 import { AdminConfig, AdminConfigResult } from '@/lib/admin.types';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 
+import DanmakuAdmin from '@/components/DanmakuAdmin';
 import DataMigration from '@/components/DataMigration';
 import PageLayout from '@/components/PageLayout';
 
@@ -4505,6 +4506,7 @@ function AdminPageClient() {
     categoryConfig: false,
     configFile: false,
     dataMigration: false,
+    danmakuImport: true,
   });
 
   // 获取管理员配置
@@ -4650,6 +4652,18 @@ function AdminPageClient() {
           </CollapsibleTab>
 
           <div className='space-y-4'>
+            {/* 弹幕导入配置标签 */}
+            <CollapsibleTab
+              title='弹幕导入配置'
+              icon={
+                <Video size={20} className='text-purple-600 dark:text-purple-400' />
+              }
+              isExpanded={expandedTabs.danmakuImport}
+              onToggle={() => toggleTab('danmakuImport')}
+            >
+              <DanmakuAdmin />
+            </CollapsibleTab>
+
             {/* 用户配置标签 */}
             <CollapsibleTab
               title='用户配置'

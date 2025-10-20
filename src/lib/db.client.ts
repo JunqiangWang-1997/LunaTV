@@ -66,6 +66,7 @@ interface UserCacheStore {
   favorites?: CacheData<Record<string, Favorite>>;
   searchHistory?: CacheData<string[]>;
   skipConfigs?: CacheData<Record<string, SkipConfig>>;
+  danmakuSettings?: CacheData<any>;
 }
 
 // ---- 常量 ----
@@ -337,6 +338,24 @@ class HybridCacheManager {
 
     const userCache = this.getUserCache(username);
     userCache.skipConfigs = this.createCacheData(data);
+    this.saveUserCache(username, userCache);
+  }
+
+  // 弹幕设置缓存
+  getCachedDanmakuSettings(): any | null {
+    const username = this.getCurrentUsername();
+    if (!username) return null;
+    const userCache = this.getUserCache(username);
+    const cached = userCache.danmakuSettings;
+    if (cached && this.isCacheValid(cached)) return cached.data;
+    return null;
+  }
+
+  cacheDanmakuSettings(data: any): void {
+    const username = this.getCurrentUsername();
+    if (!username) return;
+    const userCache = this.getUserCache(username);
+    userCache.danmakuSettings = this.createCacheData(data);
     this.saveUserCache(username, userCache);
   }
 
@@ -1654,5 +1673,67 @@ export async function deleteSkipConfig(
     console.error('删除跳过片头片尾配置失败:', err);
     triggerGlobalError('删除跳过片头片尾配置失败');
     throw err;
+  }
+}
+
+/* ---------------- 弹幕显示设置（每用户） ---------------- */
+
+export interface DanmakuSettingsClientShape {
+  opacity: number;
+  fontSize: number;
+  areaBottom: string | number;
+  speed: number;
+  synchronousPlayback: boolean;
+}
+
+export async function getDanmakuSettings(): Promise<DanmakuSettingsClientShape | null> {
+  if (typeof window === 'undefined') return null;
+
+  if (STORAGE_TYPE !== 'localstorage') {
+    // 优先缓存
+    const cached = cacheManager.getCachedDanmakuSettings();
+    if (cached) return cached as DanmakuSettingsClientShape;
+    try {
+      const res = await fetchWithAuth('/api/danmaku/settings');
+      const data = (await res.json()) as DanmakuSettingsClientShape | null;
+      if (data) cacheManager.cacheDanmakuSettings(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  // localStorage 方案
+  try {
+    const raw = localStorage.getItem('moontv_danmaku_settings');
+    return raw ? (JSON.parse(raw) as DanmakuSettingsClientShape) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setDanmakuSettings(settings: DanmakuSettingsClientShape): Promise<void> {
+  if (typeof window === 'undefined') return;
+
+  if (STORAGE_TYPE !== 'localstorage') {
+    // 先缓存，后写服务器
+    cacheManager.cacheDanmakuSettings(settings);
+    try {
+      await fetchWithAuth('/api/danmaku/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+    } catch {
+      // 忽略失败，依赖下次成功
+    }
+    return;
+  }
+
+  // localStorage
+  try {
+    localStorage.setItem('moontv_danmaku_settings', JSON.stringify(settings));
+  } catch {
+    // ignore
   }
 }

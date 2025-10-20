@@ -81,6 +81,18 @@ export interface IStorage {
   deleteSkipConfig(userName: string, source: string, id: string): Promise<void>;
   getAllSkipConfigs(userName: string): Promise<{ [key: string]: SkipConfig }>;
 
+  // Sorted Set (for Danmaku)
+  zadd(key: string, ...members: { score: number; member: unknown }[]): Promise<number>;
+  zrange(key: string, start: number, stop: number): Promise<unknown[]>;
+
+  // 通用字符串读写（用于映射、索引等）
+  getString(key: string): Promise<string | null>;
+  setString(key: string, value: string): Promise<void>;
+
+  // 弹幕显示设置（每用户）
+  getDanmakuSettings(userName: string): Promise<DanmakuSettings | null>;
+  setDanmakuSettings(userName: string, settings: DanmakuSettings): Promise<void>;
+
   // 数据清理相关
   clearAllData(): Promise<void>;
 }
@@ -121,4 +133,13 @@ export interface SkipConfig {
   enable: boolean; // 是否启用跳过片头片尾
   intro_time: number; // 片头时间（秒）
   outro_time: number; // 片尾时间（秒）
+}
+
+// 弹幕显示设置（每用户持久化）
+export interface DanmakuSettings {
+  opacity: number; // 0~1
+  fontSize: number; // px
+  areaBottom: string | number; // e.g. '50%'
+  speed: number; // 弹幕持续时间(秒) 1~10，越大越慢
+  synchronousPlayback: boolean; // 是否跟随倍速
 }
